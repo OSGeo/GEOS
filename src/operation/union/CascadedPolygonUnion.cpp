@@ -42,7 +42,7 @@ namespace operation { // geos.operation
 namespace geounion {  // geos.operation.geounion
 
 
-// ////////////////////////////////////////////////////////////////////////////
+/* public static */
 std::unique_ptr<geom::Geometry>
 CascadedPolygonUnion::Union(std::vector<geom::Polygon*>* polys)
 {
@@ -50,6 +50,7 @@ CascadedPolygonUnion::Union(std::vector<geom::Polygon*>* polys)
     return op.Union();
 }
 
+/* public static */
 std::unique_ptr<geom::Geometry>
 CascadedPolygonUnion::Union(std::vector<geom::Polygon*>* polys, UnionStrategy* unionFun)
 {
@@ -57,6 +58,7 @@ CascadedPolygonUnion::Union(std::vector<geom::Polygon*>* polys, UnionStrategy* u
     return op.Union();
 }
 
+/* public static */
 std::unique_ptr<geom::Geometry>
 CascadedPolygonUnion::Union(const geom::MultiPolygon* multipoly)
 {
@@ -70,6 +72,7 @@ CascadedPolygonUnion::Union(const geom::MultiPolygon* multipoly)
     return op.Union();
 }
 
+/* public */
 std::unique_ptr<geom::Geometry>
 CascadedPolygonUnion::Union()
 {
@@ -94,13 +97,58 @@ CascadedPolygonUnion::Union()
     // TODO avoid creating this vector and run binaryUnion off the iterators directly
     std::vector<const geom::Geometry*> geoms(index.items().begin(), index.items().end());
 
-    return binaryUnion(geoms, 0, geoms.size());
+// #ifdef GEOS_OPENMP
+    return pairUnion(geoms);
+// #else
+//     return binaryUnion(geoms, 0, geoms.size());
+// #endif
+}
+
+#ifdef GEOS_OPENMP
+#include <omp.h>
+#endif
+
+/* private */
+std::unique_ptr<geom::Geometry>
+CascadedPolygonUnion::pairUnion(
+    std::vector<const geom::Geometry*>& inply) const
+{
+    int sz = (int)(inply.size());
+    int nsz = (sz / 2) + (sz % 2);
+    std::vector<std::unique_ptr<geom::Geometry>> outply((std::size_t)nsz);
+
+#pragma omp parallel for
+    for (int i = 0; i < sz; i += 2) {
+        /* Work backwards to preserve an old regression result */
+        const geom::Geometry* g0 = inply[(std::size_t)(sz - i - 1)];
+        const geom::Geometry* g1 = i+1 < sz ? inply[(std::size_t)(sz - i - 2)] : nullptr;
+        outply[(std::size_t)(i/2)] = unionSafe(g0, g1);
+    }
+
+    int step = 1;
+    while(step < nsz) {
+
+#pragma omp parallel for
+        /* Place resultant output into position 1 of the inputs */
+        /* This keeps threads from stomping on each other as they */
+        /* work through different parts of the processing */
+        for (int i0 = 0; i0 < nsz; i0 += 2*step) {
+            int i1 = i0 + step;
+            const geom::Geometry* g0 = outply[(std::size_t)(i0)].release();
+            const geom::Geometry* g1 = i1 < nsz ? outply[(std::size_t)(i1)].release() : nullptr;
+            outply[(std::size_t)(i0)] = unionSafe(g0, g1);
+        }
+        step *= 2;
+    }
+    return std::move(outply[0]);
 }
 
 
+/* private */
 std::unique_ptr<geom::Geometry>
-CascadedPolygonUnion::binaryUnion(const std::vector<const geom::Geometry*> & geoms,
-                                  std::size_t start, std::size_t end)
+CascadedPolygonUnion::binaryUnion(
+    const std::vector<const geom::Geometry*> & geoms,
+    std::size_t start, std::size_t end) const
 {
     if(end - start <= 1) {
         return unionSafe(geoms[start], nullptr);
@@ -117,8 +165,10 @@ CascadedPolygonUnion::binaryUnion(const std::vector<const geom::Geometry*> & geo
     }
 }
 
+/* private */
 std::unique_ptr<geom::Geometry>
-CascadedPolygonUnion::unionSafe(const geom::Geometry* g0, const geom::Geometry* g1) const
+CascadedPolygonUnion::unionSafe(
+    const geom::Geometry* g0, const geom::Geometry* g1) const
 {
     if(g0 == nullptr && g1 == nullptr) {
         return nullptr;
@@ -134,8 +184,11 @@ CascadedPolygonUnion::unionSafe(const geom::Geometry* g0, const geom::Geometry* 
     return unionActual(g0, g1);
 }
 
+/* private */
 std::unique_ptr<geom::Geometry>
-CascadedPolygonUnion::unionSafe(std::unique_ptr<geom::Geometry> && g0, std::unique_ptr<geom::Geometry> && g1)
+CascadedPolygonUnion::unionSafe(
+    std::unique_ptr<geom::Geometry> && g0,
+    std::unique_ptr<geom::Geometry> && g1) const
 {
     if(g0 == nullptr && g1 == nullptr) {
         return nullptr;
@@ -151,22 +204,29 @@ CascadedPolygonUnion::unionSafe(std::unique_ptr<geom::Geometry> && g0, std::uniq
     return unionActual(std::move(g0), std::move(g1));
 }
 
+/* private */
 std::unique_ptr<geom::Geometry>
-CascadedPolygonUnion::unionActual(const geom::Geometry* g0, const geom::Geometry* g1) const
+CascadedPolygonUnion::unionActual(
+    const geom::Geometry* g0,
+    const geom::Geometry* g1) const
 {
     std::unique_ptr<geom::Geometry> ug;
     ug = unionFunction->Union(g0, g1);
     return restrictToPolygons(std::move(ug));
 }
 
+/* private */
 std::unique_ptr<geom::Geometry>
-CascadedPolygonUnion::unionActual(std::unique_ptr<geom::Geometry> && g0, std::unique_ptr<geom::Geometry> && g1) const
+CascadedPolygonUnion::unionActual(
+    std::unique_ptr<geom::Geometry> && g0,
+    std::unique_ptr<geom::Geometry> && g1) const
 {
     std::unique_ptr<geom::Geometry> ug;
     ug = unionFunction->Union(std::move(g0), std::move(g1));
     return restrictToPolygons(std::move(ug));
 }
 
+/* private static */
 std::unique_ptr<geom::Geometry>
 CascadedPolygonUnion::restrictToPolygons(std::unique_ptr<geom::Geometry> g)
 {
